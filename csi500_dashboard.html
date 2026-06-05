@@ -243,7 +243,7 @@
 
   <!-- Signal & Trade Records -->
   <div class="card" style="margin-bottom:16px;">
-    <h3>信号与交易记录表（近120天）</h3>
+    <h3>信号与交易记录表（全历史）</h3>
     <div style="overflow-x:auto;">
       <table style="font-size:12px;min-width:1060px;">
         <thead><tr>
@@ -252,6 +252,16 @@
           <th>MA15</th><th>偏离率</th>
         </tr></thead>
         <tbody id="signal-tbody"></tbody>
+      </table>
+      <div id="table-pager" style="display:flex;justify-content:center;align-items:center;gap:8px;padding:10px 0;font-size:13px;color:var(--sub);">
+        <button id="pg-first" onclick="goPage(1)" style="padding:4px 10px;cursor:pointer;border:1px solid var(--border);border-radius:4px;background:var(--card);color:var(--fg);">首页</button>
+        <button id="pg-prev" onclick="goPage(_tablePage-1)" style="padding:4px 10px;cursor:pointer;border:1px solid var(--border);border-radius:4px;background:var(--card);color:var(--fg);">上一页</button>
+        <span id="pg-info" style="min-width:120px;text-align:center;"></span>
+        <button id="pg-next" onclick="goPage(_tablePage+1)" style="padding:4px 10px;cursor:pointer;border:1px solid var(--border);border-radius:4px;background:var(--card);color:var(--fg);">下一页</button>
+        <button id="pg-last" onclick="goPage(_tablePages)" style="padding:4px 10px;cursor:pointer;border:1px solid var(--border);border-radius:4px;background:var(--card);color:var(--fg);">末页</button>
+        <input id="pg-jump" type="number" min="1" style="width:60px;padding:4px;border:1px solid var(--border);border-radius:4px;background:var(--card);color:var(--fg);text-align:center;" placeholder="页码">
+        <button onclick="goPage(parseInt(document.getElementById('pg-jump').value)||1)" style="padding:4px 10px;cursor:pointer;border:1px solid var(--border);border-radius:4px;background:var(--card);color:var(--fg);">跳转</button>
+      </div>
       </table>
     </div>
   </div>
@@ -405,11 +415,15 @@ function render() {
 }
 
 // ==================== 信号与交易记录表 ====================
+var _allRows = [];
+var _tablePage = 1;
+var _tablePages = 1;
+var _pageSize = 100;
+
 function renderSignalTable() {
   var cd = _CHART_DATA__;
   if (!cd || !cd.kline || !cd.signals) return;
   var kl = cd.kline, ma = cd.ma15, sig = cd.signals;
-  var startIdx = Math.max(0, kl.length - 120);
   // Position tracking (T+1: signal on day i-1 -> execute on day i at open)
   var inPos = [];
   inPos[0] = false;
@@ -431,12 +445,13 @@ function renderSignalTable() {
       nav[i] = nav[i-1];
     }
   }
-  var rows = [];
+  // Build all rows (full history)
+  _allRows = [];
   var entryPrice = null, entryIdx = null;
-  for (var i = startIdx; i < kl.length; i++) {
+  for (var i = 0; i < kl.length; i++) {
     var s = sig[i] || 'WAIT';
+    if (s === null && i < 14) { s = 'WAIT'; }
     var buyPrice = '', sellPrice = '', pnl = '', holdDays = '';
-    // 交易信号：T+1执行，加上持仓/观望状态
     var tradeSig = '', tradeCls = '';
     if (i > 0 && sig[i-1] === 'BUY') {
       tradeSig = '买入'; tradeCls = 'buy';
@@ -460,18 +475,29 @@ function renderSignalTable() {
     var maVal = ma[i];
     var devPct = maVal ? ((kl[i].close - maVal) / maVal * 100) : null;
     var sigCN = {BUY:'买入',SELL:'卖出',HOLD:'持仓',WAIT:'观望'}[s]||'--';
-    var sigCls = s.toLowerCase();
+    var sigCls = (s || 'wait').toLowerCase();
     var totalRet = (nav[i] - 1) * 100;
-    rows.push({
+    _allRows.push({
       date: kl[i].date, sigCN: sigCN, sigCls: sigCls, tradeSig: tradeSig, tradeCls: tradeCls,
       close: kl[i].close, open: kl[i].open, ma15: maVal, devPct: devPct,
       buyPrice: buyPrice, sellPrice: sellPrice, pnl: pnl, holdDays: holdDays,
       totalRet: totalRet
     });
   }
-  // Render (latest first)
+  // Reverse so latest first
+  _allRows.reverse();
+  _tablePages = Math.max(1, Math.ceil(_allRows.length / _pageSize));
+  _tablePage = 1;
+  renderTablePage();
+}
+
+function renderTablePage() {
+  var start = (_tablePage - 1) * _pageSize;
+  var end = Math.min(start + _pageSize, _allRows.length);
+  var pageRows = _allRows.slice(start, end);
+
   var tbody = document.getElementById('signal-tbody');
-  tbody.innerHTML = rows.slice().reverse().map(function(r) {
+  tbody.innerHTML = pageRows.map(function(r) {
     var pnlColor = '';
     if (r.pnl) {
       var pnlNum = parseFloat(r.pnl);
@@ -494,6 +520,21 @@ function renderSignalTable() {
       '<td style="color:' + (r.devPct !== null ? (r.devPct >= 0 ? '#e74c3c' : '#27ae60') : 'var(--sub)') + '">' + (r.devPct !== null ? (r.devPct >= 0 ? '+' : '') + r.devPct.toFixed(2) + '%' : '--') + '</td>' +
       '</tr>';
   }).join('');
+
+  // Update pager
+  document.getElementById('pg-info').textContent = '第 ' + _tablePage + ' / ' + _tablePages + ' 页 (共' + _allRows.length + '条)';
+  document.getElementById('pg-first').disabled = _tablePage <= 1;
+  document.getElementById('pg-prev').disabled = _tablePage <= 1;
+  document.getElementById('pg-next').disabled = _tablePage >= _tablePages;
+  document.getElementById('pg-last').disabled = _tablePage >= _tablePages;
+  document.getElementById('pg-jump').max = _tablePages;
+}
+
+function goPage(p) {
+  p = Math.max(1, Math.min(_tablePages, p || 1));
+  _tablePage = p;
+  renderTablePage();
+  document.querySelector('.table-section').scrollIntoView({behavior:'smooth', block:'start'});
 }
 
 // ==================== 回测参考 ====================

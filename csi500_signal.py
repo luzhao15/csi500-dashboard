@@ -71,11 +71,17 @@ def fetch_csi500_kline(period=5200):
         "Referer": "https://quote.eastmoney.com/",
     }
 
-    try:
-        resp = requests.get(url, params=params, headers=headers, timeout=30)
-        data = resp.json()
-    except Exception as e:
-        return {"error": f"网络请求失败: {e}"}
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            resp = requests.get(url, params=params, headers=headers, timeout=30)
+            data = resp.json()
+            break
+        except Exception as e:
+            if attempt < max_retries - 1:
+                time.sleep(3)
+            else:
+                return {"error": f"网络请求失败(重试{max_retries}次): {e}"}
 
     if data.get("data") is None or data["data"].get("klines") is None:
         return {"error": "接口返回无数据"}

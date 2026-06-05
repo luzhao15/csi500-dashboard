@@ -301,17 +301,52 @@ def run_backtest(records):
 
 # ==================== 主流程 ====================
 
+def load_existing_chart(script_dir):
+    """加载仓库中已有的 csi500_chart.json 作为 fallback 数据"""
+    chart_path = os.path.join(script_dir, "csi500_chart.json")
+    if not os.path.exists(chart_path):
+        return None
+    try:
+        with open(chart_path, "r", encoding="utf-8") as f:
+            chart = json.load(f)
+        klines = chart.get("kline", [])
+        records = []
+        for k in klines:
+            records.append({
+                "date": k["date"],
+                "open": float(k["open"]),
+                "close": float(k["close"]),
+                "high": float(k["high"]),
+                "low": float(k["low"]),
+                "volume": 0,
+            })
+        print(f"📂 已加载本地历史数据: {len(records)}条 ({records[0]['date']} ~ {records[-1]['date']})")
+        return records
+    except Exception as e:
+        print(f"⚠️ 加载本地数据失败: {e}")
+        return None
+
+
 if __name__ == "__main__":
-    result = fetch_csi500_kline(5200)  # 全部历史
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+
+    # 1) 尝试从 API 获取全部历史
+    result = fetch_csi500_kline(5200)
 
     if "error" in result:
-        print(json.dumps(result, ensure_ascii=False, indent=2))
-        sys.exit(1)
+        print(f"⚠️ API 获取失败: {result['error']}")
+        # 2) Fallback: 使用仓库中已有的 csi500_chart.json
+        records = load_existing_chart(script_dir)
+        if records is None:
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+            sys.exit(1)
+        api_success = False
+    else:
+        records = result["records"]
+        api_success = True
 
-    # 获取实时行情
-    rt = fetch_realtime_quote()
-
-    records = result["records"]
+    # 获取实时行情（非关键，失败不影响主流程）
+    rt = fetch_realtime_quote() if api_success else None
     records = calc_ma15(records)
     records = calc_ma_extra(records)
     signals = find_signals(records)
@@ -375,7 +410,7 @@ if __name__ == "__main__":
     }
 
     # ==================== 保存输出文件 ====================
-    script_dir = os.path.dirname(os.path.abspath(__file__))
+    # script_dir 已在主流程开头定义
 
     # 1) csi500_signal.json（完整信号数据，兼容旧格式）
     out_path = os.path.join(script_dir, "csi500_signal.json")

@@ -1,0 +1,10 @@
+pylibs/
+__pycache__/
+*.pyc
+current_url.txt
+keep_alive.bat
+keep_alive.py
+serve_local.bat
+_gen_data.py
+_build_html.py
+csi500_signal.json

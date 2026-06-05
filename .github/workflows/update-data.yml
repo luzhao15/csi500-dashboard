@@ -3,7 +3,7 @@ name: Update CSI500 Data
 on:
   schedule:
     # 每天 22:00 北京时间 (UTC+8 = 14:00 UTC)
-    - cron: '0 14 * * 1-5'
+    - cron: '30 7 * * 1-5'
   workflow_dispatch: # 支持手动触发
 
 permissions:

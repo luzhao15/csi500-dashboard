@@ -352,17 +352,16 @@ if __name__ == "__main__":
 
     # 如果实时行情获取成功，用实时收盘价更新最后一天K线
     # 解决K线API收盘后延迟更新最终收盘价的问题
+    # 不限制日期匹配，因为周末/节假日运行时today和最后交易日不同
     if rt and rt.get("price") and records:
-        today = datetime.now().strftime("%Y-%m-%d")
-        if records[-1]["date"] == today:
-            records[-1]["close"] = rt["price"]
-            if rt.get("high"):
-                records[-1]["high"] = rt["high"]
-            if rt.get("low"):
-                records[-1]["low"] = rt["low"]
-            if rt.get("open"):
-                records[-1]["open"] = rt["open"]
-            print(f"📊 已用实时行情更新今日数据: close={rt['price']}")
+        records[-1]["close"] = rt["price"]
+        if rt.get("high"):
+            records[-1]["high"] = rt["high"]
+        if rt.get("low"):
+            records[-1]["low"] = rt["low"]
+        if rt.get("open"):
+            records[-1]["open"] = rt["open"]
+        print(f"📊 已用实时行情更新数据: close={rt['price']} (K线日期={records[-1]['date']})")
 
     records = calc_ma15(records)
     records = calc_ma_extra(records)

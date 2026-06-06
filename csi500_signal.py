@@ -318,7 +318,7 @@ def load_existing_chart(script_dir):
                 "date": k["date"],
                 "open": float(k["open"]),
                 "close": float(k["close"]),
-                "high": float(k["high"],
+                "high": float(k["high"]),
                 "low": float(k["low"]),
                 "volume": 0,
             })

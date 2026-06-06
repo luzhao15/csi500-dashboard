@@ -487,3 +487,4 @@ if __name__ == "__main__":
     print(f"\n数据范围: {records[0]['date']} ~ {records[-1]['date']} ({len(records)}条)")
     print(f"当前信号: {latest_signal['signal']} @ {latest_signal['date']}")
     print(f"回测总收益: {bt['total_return']}, 买入持有: {bt['bah_return']}")
+# auto update Sat Jun  6 04:27:27 PM CST 2026

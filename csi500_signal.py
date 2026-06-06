@@ -87,7 +87,6 @@ def fetch_csi500_kline(period=5200):
         return {"error": "接口返回无数据"}
 
     klines = data["data"]["klines"]
-
     records = []
     for line in klines:
         parts = line.split(",")
@@ -151,7 +150,6 @@ def find_signals(records):
             "signal": signal,
             "pct_from_ma": round((t_close - t_ma) / t_ma * 100, 2),
         })
-
     return signals
 
 
@@ -162,10 +160,12 @@ def calc_ma_extra(records):
             records[i]["ma20"] = round(sum(r["close"] for r in records[i-19:i+1]) / 20, 2)
         else:
             records[i]["ma20"] = None
+
         if i >= 59:
             records[i]["ma60"] = round(sum(r["close"] for r in records[i-59:i+1]) / 60, 2)
         else:
             records[i]["ma60"] = None
+
         if i >= 119:
             records[i]["ma120"] = round(sum(r["close"] for r in records[i-119:i+1]) / 120, 2)
         else:
@@ -175,10 +175,11 @@ def calc_ma_extra(records):
 
 def run_backtest(records):
     """
-    动态回测：15日均线策略 T+1执行
-    - 信号日T产生信号 → T+1日以开盘价买入/卖出
-    - 持仓期间按close-to-close计算NAV
-    - 空仓期间NAV不变
+    动态回测：15日均线策略
+    T+1执行 - 信号日T产生信号 → T+1日以开盘价买入/卖出
+    持仓期间按close-to-close计算NAV
+    空仓期间NAV不变
+
     返回回测摘要统计
     """
     # 1) 生成信号序列
@@ -272,6 +273,7 @@ def run_backtest(records):
     bah_return_val = round((bah_nav[-1] - 1) * 100, 2)
     ann_return = round((nav[-1] ** (1 / years) - 1) * 100, 2) if years > 0 else 0
     ann_bah = round((bah_nav[-1] ** (1 / years) - 1) * 100, 2) if years > 0 else 0
+
     win_rate = round(win_trades / total_trades * 100, 1) if total_trades > 0 else 0
     avg_win = round(sum(t["pnl_pct"] for t in wins) / len(wins), 2) if wins else 0
     avg_loss = round(sum(t["pnl_pct"] for t in losses) / len(losses), 2) if losses else 0
@@ -316,7 +318,7 @@ def load_existing_chart(script_dir):
                 "date": k["date"],
                 "open": float(k["open"]),
                 "close": float(k["close"]),
-                "high": float(k["high"]),
+                "high": float(k["high"],
                 "low": float(k["low"]),
                 "volume": 0,
             })
@@ -345,8 +347,23 @@ if __name__ == "__main__":
         records = result["records"]
         api_success = True
 
-    # 获取实时行情（非关键，失败不影响主流程）
+    # 获取实时行情，收盘后用实时价覆盖当天K线数据
     rt = fetch_realtime_quote() if api_success else None
+
+    # 如果实时行情获取成功，用实时收盘价更新最后一天K线
+    # 解决K线API收盘后延迟更新最终收盘价的问题
+    if rt and rt.get("price") and records:
+        today = datetime.now().strftime("%Y-%m-%d")
+        if records[-1]["date"] == today:
+            records[-1]["close"] = rt["price"]
+            if rt.get("high"):
+                records[-1]["high"] = rt["high"]
+            if rt.get("low"):
+                records[-1]["low"] = rt["low"]
+            if rt.get("open"):
+                records[-1]["open"] = rt["open"]
+            print(f"📊 已用实时行情更新今日数据: close={rt['price']}")
+
     records = calc_ma15(records)
     records = calc_ma_extra(records)
     signals = find_signals(records)
@@ -356,6 +373,7 @@ if __name__ == "__main__":
 
     # 最近一条信号
     latest_signal = signals[-1] if signals else None
+
     # 最近10条信号
     recent = signals[-10:] if len(signals) >= 10 else signals
 

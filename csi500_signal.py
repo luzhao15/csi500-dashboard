@@ -19,12 +19,45 @@ import requests
 
 # ==================== 数据获取 ====================
 
-def fetch_realtime_quote():
-    """从东方财富获取中证500实时行情"""
-    secid = "1.000905"
+def fetch_realtime_quote_tencent():
+    """从腾讯获取中证500实时行情"""
+    url = "https://qt.gtimg.cn/q=sh000905"
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+    try:
+        resp = requests.get(url, headers=headers, timeout=10)
+        resp.encoding = "gbk"
+        text = resp.text
+        # 格式: v_sh000905="1~中证500~000905~7963.45~7978.66~8142.34~..."
+        if "~" not in text:
+            return None
+        parts = text.split("~")
+        if len(parts) < 40:
+            return None
+        # parts[3]=当前价, parts[4]=昨收, parts[5]=开盘, parts[33]=最高, parts[34]=最低
+        price = float(parts[3]) if parts[3] else None
+        yclose = float(parts[4]) if parts[4] else None
+        open_p = float(parts[5]) if parts[5] else None
+        high = float(parts[33]) if len(parts) > 33 and parts[33] else None
+        low = float(parts[34]) if len(parts) > 34 and parts[34] else None
+        chg_pct = round((price - yclose) / yclose * 100, 2) if price and yclose else None
+        return {
+            "price": round(price, 2) if price else None,
+            "chg_pct": chg_pct,
+            "chg_amt": round(price - yclose, 2) if price and yclose else None,
+            "open": round(open_p, 2) if open_p else None,
+            "high": round(high, 2) if high else None,
+            "low": round(low, 2) if low else None,
+            "yclose": round(yclose, 2) if yclose else None,
+        }
+    except Exception:
+        return None
+
+
+def fetch_realtime_quote_eastmoney():
+    """从东方财富获取中证500实时行情（备用）"""
     url = "https://push2.eastmoney.com/api/qt/stock/get"
     params = {
-        "secid": secid,
+        "secid": "1.000905",
         "ut": "fa5fd1943c7b386f172d6893dbfba10b",
         "fields": "f43,f44,f45,f46,f169,f170,f60,f86",
     }
@@ -47,13 +80,61 @@ def fetch_realtime_quote():
                 "low": round(d.get("f45", 0) / 100, 2) if d.get("f45") else None,
                 "yclose": round(d.get("f60", 0) / 100, 2) if d.get("f60") else None,
             }
-    except Exception as e:
+    except Exception:
         pass
     return None
 
 
-def fetch_csi500_kline(period=5200):
-    """从东方财富获取中证500日K线数据（前复权）"""
+def fetch_realtime_quote():
+    """获取中证500实时行情 —— 优先腾讯，降级东方财富"""
+    rt = fetch_realtime_quote_tencent()
+    if rt:
+        return rt
+    return fetch_realtime_quote_eastmoney()
+
+
+def fetch_csi500_kline_tencent(lmt=320):
+    """从腾讯获取中证500日K线（支持最多~2000条，lmt越大越久远）—— 主数据源"""
+    url = "https://web.ifzq.gtimg.cn/appstock/app/fqkline/get"
+    # lmt 最大约2000, 按需调整: 320≈1年, 640≈2.5年, 2000≈8年
+    actual_lmt = min(lmt, 2000)
+    params = {"param": f"sh000905,day,,,{actual_lmt},qfq"}
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+    try:
+        resp = requests.get(url, params=params, headers=headers, timeout=30)
+        data = resp.json()
+        if data.get("code") != 0:
+            return {"error": f"腾讯接口返回错误: {data.get('msg','')}"}
+        stock_data = data.get("data", {})
+        if not isinstance(stock_data, dict):
+            return {"error": "腾讯接口数据格式异常"}
+        sh_data = stock_data.get("sh000905", {})
+        if not isinstance(sh_data, dict):
+            return {"error": "腾讯接口数据格式异常"}
+        days = sh_data.get("day", [])
+        if not days:
+            return {"error": "腾讯接口返回无数据"}
+        records = []
+        for d in days:
+            if not isinstance(d, list) or len(d) < 5:
+                continue
+            records.append({
+                "date": str(d[0]),
+                "open": float(d[1]),
+                "close": float(d[2]),
+                "high": float(d[3]),
+                "low": float(d[4]),
+                "volume": float(d[5]) if len(d) > 5 and d[5] else 0,
+            })
+        # 同时提取实时行情 qt
+        qt = sh_data.get("qt", {}).get("sh000905", [])
+        return {"records": records, "count": len(records), "qt": qt}
+    except Exception as e:
+        return {"error": f"腾讯接口请求失败: {e}"}
+
+
+def fetch_csi500_kline_eastmoney(period=5200):
+    """从东方财富获取中证500日K线数据（前复权）—— 备用数据源"""
     secid = "1.000905"
     url = "https://push2his.eastmoney.com/api/qt/stock/kline/get"
     params = {
@@ -70,38 +151,48 @@ def fetch_csi500_kline(period=5200):
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
         "Referer": "https://quote.eastmoney.com/",
     }
-
-    max_retries = 3
-    for attempt in range(max_retries):
+    for attempt in range(3):
         try:
             resp = requests.get(url, params=params, headers=headers, timeout=30)
             data = resp.json()
-            break
-        except Exception as e:
-            if attempt < max_retries - 1:
-                time.sleep(3)
-            else:
-                return {"error": f"网络请求失败(重试{max_retries}次): {e}"}
+            if data.get("data") is None or data["data"].get("klines") is None:
+                return {"error": "东方财富接口返回无数据"}
+            klines = data["data"]["klines"]
+            records = []
+            for line in klines:
+                parts = line.split(",")
+                if len(parts) < 6:
+                    continue
+                records.append({
+                    "date": parts[0],
+                    "open": float(parts[1]),
+                    "close": float(parts[2]),
+                    "high": float(parts[3]),
+                    "low": float(parts[4]),
+                    "volume": float(parts[5]),
+                })
+            return {"records": records, "count": len(records)}
+        except Exception:
+            if attempt < 2:
+                time.sleep(2)
+    return {"error": "东方财富接口请求失败(重试3次)"}
 
-    if data.get("data") is None or data["data"].get("klines") is None:
-        return {"error": "接口返回无数据"}
 
-    klines = data["data"]["klines"]
-    records = []
-    for line in klines:
-        parts = line.split(",")
-        if len(parts) < 6:
-            continue
-        records.append({
-            "date": parts[0],
-            "open": float(parts[1]),
-            "close": float(parts[2]),
-            "high": float(parts[3]),
-            "low": float(parts[4]),
-            "volume": float(parts[5]),
-        })
-
-    return {"records": records, "count": len(records)}
+def fetch_csi500_kline(period=5200):
+    """获取中证500日K线 —— 优先腾讯，降级东方财富"""
+    print("📡 尝试腾讯数据源...")
+    result = fetch_csi500_kline_tencent(period)
+    if "error" not in result:
+        print(f"✅ 腾讯数据源成功: {result['count']}条")
+        return result
+    print(f"⚠️ 腾讯数据源失败: {result['error']}")
+    print("📡 尝试东方财富数据源...")
+    result = fetch_csi500_kline_eastmoney(period)
+    if "error" not in result:
+        print(f"✅ 东方财富数据源成功: {result['count']}条")
+        return result
+    print(f"⚠️ 东方财富数据源也失败: {result['error']}")
+    return result
 
 
 def calc_ma15(records):
@@ -304,7 +395,7 @@ def run_backtest(records):
 # ==================== 主流程 ====================
 
 def load_existing_chart(script_dir):
-    """加载仓库中已有的 csi500_chart.json 作为 fallback 数据"""
+    """加载仓库中已有的 csi500_chart.json 作为历史数据"""
     chart_path = os.path.join(script_dir, "csi500_chart.json")
     if not os.path.exists(chart_path):
         return None
@@ -322,37 +413,79 @@ def load_existing_chart(script_dir):
                 "low": float(k["low"]),
                 "volume": 0,
             })
-        print(f"📂 已加载本地历史数据: {len(records)}条 ({records[0]['date']} ~ {records[-1]['date']})")
+        print(f"\U0001f4c2 已加载本地历史数据: {len(records)}条 ({records[0]['date']} ~ {records[-1]['date']})")
         return records
     except Exception as e:
-        print(f"⚠️ 加载本地数据失败: {e}")
+        print(f"\u26a0\ufe0f 加载本地数据失败: {e}")
+        return None
+
+
+def merge_records(existing_records, new_records):
+    """合并新旧数据：用新数据覆盖重叠日期，追加新日期"""
+    date_map = {r["date"]: r for r in existing_records} if existing_records else {}
+    for r in new_records:
+        date_map[r["date"]] = r
+    merged = sorted(date_map.values(), key=lambda x: x["date"])
+    return merged
+
+
+def extract_rt_from_qt(qt):
+    """从腾讯K线接口返回的qt字段提取实时行情"""
+    if not qt or len(qt) < 35:
+        return None
+    try:
+        price = float(qt[3]) if qt[3] else None
+        yclose = float(qt[4]) if qt[4] else None
+        open_p = float(qt[5]) if qt[5] else None
+        high = float(qt[33]) if qt[33] else None
+        low = float(qt[34]) if qt[34] else None
+        chg_pct = round((price - yclose) / yclose * 100, 2) if price and yclose else None
+        return {
+            "price": round(price, 2) if price else None,
+            "chg_pct": chg_pct,
+            "chg_amt": round(price - yclose, 2) if price and yclose else None,
+            "open": round(open_p, 2) if open_p else None,
+            "high": round(high, 2) if high else None,
+            "low": round(low, 2) if low else None,
+            "yclose": round(yclose, 2) if yclose else None,
+        }
+    except (ValueError, IndexError):
         return None
 
 
 if __name__ == "__main__":
     script_dir = os.path.dirname(os.path.abspath(__file__))
 
-    # 1) 尝试从 API 获取全部历史
-    result = fetch_csi500_kline(5200)
+    # 1) 加载已有历史数据（必须，作为数据底座）
+    existing_records = load_existing_chart(script_dir)
+    if existing_records is None:
+        print("\u274c 无法加载本地历史数据，退出")
+        sys.exit(1)
 
-    if "error" in result:
-        print(f"⚠️ API 获取失败: {result['error']}")
-        # 2) Fallback: 使用仓库中已有的 csi500_chart.json
-        records = load_existing_chart(script_dir)
-        if records is None:
-            print(json.dumps(result, ensure_ascii=False, indent=2))
-            sys.exit(1)
-        api_success = False
-    else:
-        records = result["records"]
+    # 2) 从 API 获取最新数据（腾讯优先）
+    result = fetch_csi500_kline(320)  # 拉取最近~1年数据用于合并
+    rt = None
+
+    if "error" not in result and result.get("records"):
+        new_records = result["records"]
+        records = merge_records(existing_records, new_records)
+
+        # 从腾讯K线接口自带qt中提取实时行情
+        if "qt" in result and result["qt"]:
+            rt = extract_rt_from_qt(result["qt"])
         api_success = True
+    else:
+        print(f"\u26a0\ufe0f API 获取失败，使用本地数据")
+        records = existing_records
+        api_success = False
 
-    # 获取实时行情，收盘后用实时价覆盖当天K线数据
-    rt = fetch_realtime_quote() if api_success else None
+    # 3) 如果腾讯qt没拿到实时行情，单独拉取
+    if rt is None:
+        rt = fetch_realtime_quote()
+        if rt:
+            print(f"\U0001f4ca 腾讯实时行情获取成功: price={rt['price']}")
 
-    # 如果实时行情获取成功，用实时收盘价更新最后一天K线
-    # 解决K线API收盘后延迟更新最终收盘价的问题
-    # 不限制日期匹配，因为周末/节假日运行时today和最后交易日不同
+    # 4) 用实时收盘价更新最后一天K线
     if rt and rt.get("price") and records:
         records[-1]["close"] = rt["price"]
         if rt.get("high"):
@@ -361,7 +494,7 @@ if __name__ == "__main__":
             records[-1]["low"] = rt["low"]
         if rt.get("open"):
             records[-1]["open"] = rt["open"]
-        print(f"📊 已用实时行情更新数据: close={rt['price']} (K线日期={records[-1]['date']})")
+        print(f"\U0001f4ca 已用实时行情更新数据: close={rt['price']} (K线日期={records[-1]['date']})")
 
     records = calc_ma15(records)
     records = calc_ma_extra(records)

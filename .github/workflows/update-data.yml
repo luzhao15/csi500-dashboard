@@ -2,8 +2,12 @@ name: Update CSI500 Data
 
 on:
   schedule:
-    # 每天15:30北京时间收盘后更新 (UTC 07:30 = 北京15:30)
+    # 多重保底: 15:30/15:45/16:00/16:15 北京时间
+    # GitHub cron 可能跳过某次，但不太可能连续4次都跳过
     - cron: '30 7 * * 1-5'
+    - cron: '45 7 * * 1-5'
+    - cron: '0 8 * * 1-5'
+    - cron: '15 8 * * 1-5'
   workflow_dispatch:
 
 permissions:
@@ -17,18 +21,34 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Check if today's data already exists
+        id: check
+        run: |
+          TODAY=$(date +%Y-%m-%d)
+          if grep -q "\"$TODAY\"" csi500_data.json 2>/dev/null; then
+            echo "already=true" >> $GITHUB_OUTPUT
+            echo "✅ 今日数据已存在: $TODAY，跳过更新"
+          else
+            echo "already=false" >> $GITHUB_OUTPUT
+            echo "🔄 今日数据不存在，开始更新"
+          fi
+
       - name: Set up Python
+        if: steps.check.outputs.already != 'true'
         uses: actions/setup-python@v5
         with:
           python-version: '3.12'
 
       - name: Install dependencies
+        if: steps.check.outputs.already != 'true'
         run: pip install requests
 
       - name: Run signal script
+        if: steps.check.outputs.already != 'true'
         run: python csi500_signal.py
 
       - name: Commit and push if changed
+        if: steps.check.outputs.already != 'true'
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"

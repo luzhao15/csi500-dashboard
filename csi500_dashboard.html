@@ -3,10 +3,10 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
-<title>中证500 · 15日均线买卖信号</title>
+<title>中证500 · MA15+MA30趋势+斜率过滤信号</title>
 <style>
   :root {
-    --buy: #e74c3c; --sell: #27ae60; --hold: #f39c12; --wait: #95a5a6;
+    --buy: #e74c3c; --sell: #27ae60; --hold: #f39c12; --wait: #95a5a6; --filtered: #f97316;
     --bg: #0f172a; --card: #1e293b; --border: #334155;
     --text: #e2e8f0; --sub: #94a3b8;
   }
@@ -62,6 +62,7 @@
   .signal-hero.sell { border-color: var(--sell); }
   .signal-hero.hold { border-color: var(--hold); }
   .signal-hero.wait { border-color: var(--wait); }
+  .signal-hero.filtered { border-color: var(--filtered); }
   .signal-icon { font-size: 56px; margin-bottom: 8px; }
   .signal-label { font-size: 24px; font-weight: 800; margin-bottom: 6px; }
   .signal-desc { font-size: 13px; color: var(--sub); margin-bottom: 18px; }
@@ -121,6 +122,7 @@
   .sig-badge.sell { background: rgba(39,174,96,0.15); color: #27ae60; }
   .sig-badge.hold { background: rgba(243,156,18,0.15); color: #f39c12; }
   .sig-badge.wait { background: rgba(149,165,166,0.15); color: #95a5a6; }
+  .sig-badge.filtered { background: rgba(249,115,22,0.15); color: #f97316; }
 
   /* Loading overlay */
   .loading-overlay {
@@ -167,8 +169,8 @@
 
 <div class="header">
   <div class="header-left">
-    <h1>中证500 · 15日均线信号</h1>
-    <div class="sub">代码 000905 | 策略：上穿买入 · 跌破卖出</div>
+    <h1>中证500 · MA15+MA30趋势过滤信号</h1>
+    <div class="sub">代码 000905 | 策略：上穿MA15买入(需price>MA30且斜率>0) · 跌破MA15卖出</div>
   </div>
   <div class="header-right">
     <div class="meta">
@@ -218,7 +220,7 @@
 
   <!-- Trend -->
   <div class="card" style="margin-bottom:16px;">
-    <h3>📊 趋势判断（MA20 / MA60 / MA120）</h3>
+    <h3>📊 趋势判断（MA20 / MA30 / MA60 / MA120 / MA15斜率）</h3>
     <div id="trend-content"></div>
   </div>
 
@@ -230,10 +232,12 @@
 
   <!-- Returns Chart -->
   <div class="card" style="margin: 0 16px 20px;">
-    <h3 style="margin-bottom:12px;">📊 累计收益率对比图</h3>
+    <h3 style="margin-bottom:12px;">📊 累计收益率对比图（最优策略=MA30+斜率过滤版）</h3>
     <div style="display:flex;gap:16px;flex-wrap:wrap;margin-bottom:8px;font-size:13px;">
-      <span style="display:flex;align-items:center;gap:6px;"><span style="width:24px;height:3px;background:#60a5fa;display:inline-block;"></span>策略收益率</span>
-      <span style="display:flex;align-items:center;gap:6px;"><span style="width:24px;height:2px;background:#f59e0b;display:inline-block;"></span>买入持有收益率</span>
+      <span style="display:flex;align-items:center;gap:6px;"><span style="width:24px;height:3px;background:#22c55e;display:inline-block;"></span><b>最优策略(过滤版)</b></span>
+      <span style="display:flex;align-items:center;gap:6px;"><span style="width:24px;height:2px;background:#f59e0b;display:inline-block;"></span>买入持有</span>
+      <span style="display:flex;align-items:center;gap:6px;"><span style="width:24px;height:2px;background:#60a5fa;display:inline-block;border-top:2px dashed #60a5fa;"></span>理论收益(无过滤)</span>
+      <span style="display:flex;align-items:center;gap:6px;"><span style="width:24px;height:2px;background:#f97316;display:inline-block;"></span>无过滤版(510500)</span>
       <span style="display:flex;align-items:center;gap:6px;"><span style="width:12px;height:16px;background:#e74c3c;border-radius:2px;display:inline-block;"></span>B 买入</span>
       <span style="display:flex;align-items:center;gap:6px;"><span style="width:12px;height:16px;background:#27ae60;border-radius:2px;display:inline-block;"></span>S 卖出</span>
     </div>
@@ -368,32 +372,48 @@ function render() {
   }
   var sig = data.current_signal;
   var SIGNAL_MAP = {
-    BUY:  { cn:'🟢 上穿买入', cls:'buy', icon:'🟢' },
+    BUY:  { cn:'🟢 上穿买入（趋势确认）', cls:'buy', icon:'🟢' },
     SELL: { cn:'🔴 跌破卖出', cls:'sell', icon:'🔴' },
     HOLD: { cn:'🟡 持仓中（线上）', cls:'hold', icon:'🟡' },
     WAIT: { cn:'⚪ 空仓观望（线下）', cls:'wait', icon:'⚪' },
+    WAIT_FILTERED: { cn:'🟠 等待确认（过滤中）', cls:'filtered', icon:'🟠' },
   };
   var sm = SIGNAL_MAP[sig.signal] || SIGNAL_MAP.WAIT;
   var hero = document.getElementById('signal-hero');
   hero.className = 'signal-hero ' + sm.cls;
   document.getElementById('signal-icon').textContent = sm.icon;
   document.getElementById('signal-label').textContent = sm.cn;
-  document.getElementById('signal-desc').textContent = '最新收盘 ' + sig.close.toLocaleString() + ' | MA15 ' + sig.ma15.toLocaleString() + ' | 偏离 ' + (sig.pct_from_ma >= 0 ? '+' : '') + sig.pct_from_ma + '%';
+  var desc = '最新收盘 ' + sig.close.toLocaleString() + ' | MA15 ' + sig.ma15.toLocaleString() + ' | 偏离 ' + (sig.pct_from_ma >= 0 ? '+' : '') + sig.pct_from_ma + '%';
+  if (sig.filter_reason) desc += ' | ' + sig.filter_reason;
+  document.getElementById('signal-desc').textContent = desc;
 
   // Trend
   var trends = data.trend;
   var trendVals = [
     { label:'短期 MA20', value:trends.ma20, maVal:L.ma20 },
+    { label:'趋势过滤 MA30', value:trends.ma30, maVal:L.ma30 },
     { label:'中期 MA60', value:trends.ma60, maVal:L.ma60 },
     { label:'长期 MA120', value:trends.ma120, maVal:L.ma120 },
   ];
+  // MA15斜率单独显示
+  if (trends.ma15_slope) {
+    trendVals.push({ label:'MA15斜率(5日)', value: trends.ma15_slope, maVal: null, isSlope: true });
+  }
   var trendHTML = '';
   trendVals.forEach(function(t) {
+    if (t.isSlope) {
+      // MA15斜率特殊显示
+      var up = t.value.indexOf('上升') >= 0;
+      var cls = up ? 'up' : 'dn';
+      trendHTML += '<div class="trend-bar"><div class="label"><span class="name">' + t.label + '</span><span style="font-weight:700;color:' + (up ? '#e74c3c' : '#27ae60') + '">' + (up ? '📈 上升(允许买入)' : '📉 下降/持平(过滤买入)') + '</span></div><div class="bar-outer"><div class="bar-inner ' + cls + '" style="width:' + (up ? '80' : '30') + '%"></div></div></div>';
+      return;
+    }
     if (!t.maVal) { trendHTML += '<div class="trend-bar"><div class="label"><span class="name">' + t.label + '</span><span>--</span></div></div>'; return; }
     var up = t.value.indexOf('上升') >= 0;
     var cls = up ? 'up' : 'dn';
     var pv = Math.min(Math.round(Math.abs((L.close - t.maVal) / t.maVal * 100) * 10), 100);
-    trendHTML += '<div class="trend-bar"><div class="label"><span class="name">' + t.label + '</span><span>' + (up ? '📈 多头' : '📉 空头') + '</span></div><div class="bar-outer"><div class="bar-inner ' + cls + '" style="width:' + pv + '%"></div></div><div style="font-size:11px;color:var(--sub);margin-top:2px">均线 ' + t.maVal.toLocaleString() + ' | 偏离 ' + Math.round(Math.abs((L.close - t.maVal) / t.maVal * 100)) + '%</div></div>';
+    var filterTag = t.label.indexOf('MA30') >= 0 ? (up ? ' ✅确认' : ' ❌过滤') : (up ? ' 📈多头' : ' 📉空头');
+    trendHTML += '<div class="trend-bar"><div class="label"><span class="name">' + t.label + '</span><span>' + filterTag + '</span></div><div class="bar-outer"><div class="bar-inner ' + cls + '" style="width:' + pv + '%"></div></div><div style="font-size:11px;color:var(--sub);margin-top:2px">均线 ' + t.maVal.toLocaleString() + ' | 偏离 ' + Math.round(Math.abs((L.close - t.maVal) / t.maVal * 100)) + '%</div></div>';
   });
   document.getElementById('trend-content').innerHTML = trendHTML;
 
@@ -474,7 +494,7 @@ function renderSignalTable() {
     }
     var maVal = ma[i];
     var devPct = maVal ? ((kl[i].close - maVal) / maVal * 100) : null;
-    var sigCN = {BUY:'买入',SELL:'卖出',HOLD:'持仓',WAIT:'观望'}[s]||'--';
+    var sigCN = {BUY:'买入',SELL:'卖出',HOLD:'持仓',WAIT:'观望',WAIT_FILTERED:'待确认'}[s]||'--';
     var sigCls = (s || 'wait').toLowerCase();
     var totalRet = (nav[i] - 1) * 100;
     _allRows.push({
@@ -541,11 +561,21 @@ function goPage(p) {
 function renderBacktest(bt) {
   if (!bt) return;
   var grid = document.getElementById('backtest-grid');
-  // 真实收益卡片（510500ETF）
-  var realHtml = '<div class="stat-box stat-highlight"><div class="val">' + bt.real_total_return + '</div><div class="lbl">510500ETF真实总收益</div></div>' +
-    '<div class="stat-box stat-highlight"><div class="val">' + bt.real_annual_return + '</div><div class="lbl">ETF真实年化收益</div></div>' +
-    '<div class="stat-box stat-highlight"><div class="val">' + bt.real_mdd + '</div><div class="lbl">ETF真实最大回撤</div></div>' +
-    '<div class="stat-box stat-highlight"><div class="val">' + bt.real_excess_return + '</div><div class="lbl">ETF真实超额收益</div></div>';
+  // 最优策略（MA30+斜率过滤版）
+  var filteredHtml = '<div class="stat-box" style="background:#0c4a1e;border:1px solid #22c55e"><div class="val" style="color:#22c55e;font-size:22px">' + bt.filtered_total_return + '</div><div class="lbl" style="color:#22c55e">最优策略总收益(过滤版)</div></div>' +
+    '<div class="stat-box" style="background:#0c4a1e;border:1px solid #22c55e"><div class="val" style="color:#22c55e">' + bt.filtered_annual_return + '</div><div class="lbl" style="color:#22c55e">最优年化收益</div></div>' +
+    '<div class="stat-box" style="background:#0c4a1e;border:1px solid #22c55e"><div class="val" style="color:#22c55e">' + bt.filtered_mdd + '</div><div class="lbl" style="color:#22c55e">最优最大回撤</div></div>' +
+    '<div class="stat-box" style="background:#0c4a1e;border:1px solid #22c55e"><div class="val" style="color:#22c55e">' + bt.filtered_excess_return + '</div><div class="lbl" style="color:#22c55e">最优超额收益(vs BAH)</div></div>';
+  // 最优策略附加指标
+  var filteredExtra = '<div class="stat-box" style="background:#0c4a1e;border:1px solid #22c55e"><div class="val" style="color:#22c55e">' + bt.filtered_sharpe + '</div><div class="lbl" style="color:#22c55e">夏普比率</div></div>' +
+    '<div class="stat-box" style="background:#0c4a1e;border:1px solid #22c55e"><div class="val" style="color:#22c55e">' + bt.filtered_calmar + '</div><div class="lbl" style="color:#22c55e">Calmar(年化/MDD)</div></div>' +
+    '<div class="stat-box" style="background:#0c4a1e;border:1px solid #22c55e"><div class="val" style="color:#22c55e">' + bt.filtered_trades + '笔</div><div class="lbl" style="color:#22c55e">交易次数</div></div>' +
+    '<div class="stat-box" style="background:#0c4a1e;border:1px solid #22c55e"><div class="val" style="color:#22c55e">' + bt.win_rate + '</div><div class="lbl" style="color:#22c55e">胜率</div></div>';
+  // 无过滤版510500ETF（对比基准）
+  var realHtml = '<div class="stat-box"><div class="val" style="color:#f97316">' + bt.real_total_return + '</div><div class="lbl">无过滤版总收益(510500)</div></div>' +
+    '<div class="stat-box"><div class="val" style="color:#f97316">' + bt.real_annual_return + '</div><div class="lbl">无过滤版年化</div></div>' +
+    '<div class="stat-box"><div class="val" style="color:#f97316">' + bt.real_mdd + '</div><div class="lbl">无过滤版MDD</div></div>' +
+    '<div class="stat-box"><div class="val" style="color:#f97316">' + bt.real_excess_return + '</div><div class="lbl">无过滤版超额</div></div>';
   // 理论收益（指数无摩擦）
   var theoHtml = '<div class="stat-box"><div class="val" style="color:var(--sub)">' + bt.total_return + '</div><div class="lbl">理论总收益(指数)</div></div>' +
     '<div class="stat-box"><div class="val" style="color:var(--sub)">' + bt.annual_return + '</div><div class="lbl">理论年化收益</div></div>' +
@@ -553,19 +583,19 @@ function renderBacktest(bt) {
     '<div class="stat-box"><div class="val" style="color:var(--sub)">' + bt.excess_return + '</div><div class="lbl">理论超额收益</div></div>';
   // 通用指标
   var commonHtml = [
-    { val: bt.win_rate, lbl:'胜率', cls:'' },
-    { val: bt.total_trades + '笔', lbl:'总交易次数', cls:'' },
-    { val: bt.avg_win, lbl:'平均盈利', cls:'val' },
-    { val: bt.avg_loss, lbl:'平均亏损', cls:'' },
-    { val: bt.profit_loss_ratio + ':1', lbl:'盈亏比', cls:'' },
-    { val: bt.bah_return, lbl:'买入持有收益', cls:'' },
-    { val: bt.bah_mdd, lbl:'买入持有最大回撤', cls:'' },
-    { val: bt.period, lbl:'回测区间', cls:'' },
-  ].map(function(s) { return '<div class="stat-box"><div class="' + (s.cls||'') + '">' + s.val + '</div><div class="lbl">' + s.lbl + '</div></div>'; }).join('');
-  // 成本说明
+    { val: bt.profit_loss_ratio + ':1', lbl:'盈亏比' },
+    { val: bt.avg_win, lbl:'平均盈利' },
+    { val: bt.avg_loss, lbl:'平均亏损' },
+    { val: bt.bah_return, lbl:'买入持有收益' },
+    { val: bt.bah_mdd, lbl:'买入持有MDD' },
+    { val: bt.period, lbl:'回测区间' },
+  ].map(function(s) { return '<div class="stat-box"><div class="val">' + s.val + '</div><div class="lbl">' + s.lbl + '</div></div>'; }).join('');
+  // 成本说明和策略说明
   var costNote = '<div style="text-align:center;font-size:12px;color:var(--sub);padding:8px 0;margin-top:8px;border-top:1px solid var(--border)">' + bt.real_cost_note + '</div>';
+  var strategyNote = '<div style="text-align:center;font-size:12px;color:#22c55e;padding:6px 0;margin-top:4px;border-top:1px solid #22c55e">' + bt.filtered_note + '</div>';
 
-  grid.innerHTML = '<div style="text-align:center;font-size:13px;color:#60a5fa;font-weight:700;margin-bottom:10px;padding:4px 8px;border-radius:6px;background:rgba(96,165,250,0.1)">⚡ 510500ETF真实回测</div>' + realHtml + costNote +
+  grid.innerHTML = '<div style="text-align:center;font-size:14px;color:#22c55e;font-weight:800;margin-bottom:8px;padding:6px 12px;border-radius:8px;background:rgba(34,197,94,0.12);border:1px solid #22c55e">⚡ 最优策略（MA30趋势+MA15斜率双重过滤）</div>' + filteredHtml + filteredExtra + strategyNote +
+    '<div style="text-align:center;font-size:13px;color:#f97316;font-weight:600;margin:12px 0 10px;padding:4px 8px;border-radius:6px;background:rgba(249,115,22,0.08)">📊 无过滤版对比（原策略基准）</div>' + realHtml + costNote +
     '<div style="text-align:center;font-size:13px;color:var(--sub);font-weight:600;margin:12px 0 10px;padding:4px 8px">📊 理论回测（CSI500指数无摩擦）</div>' + theoHtml + commonHtml;
 }
 
@@ -575,10 +605,10 @@ function renderChart(chartData) {
   var data = chartData || _CHART_DATA__;
   if (!data) return;
   try {
-    var kl = data.kline, ma = data.ma15, sig = data.signals;
+    var kl = data.kline, ma = data.ma15, ma30 = data.ma30, sig = data.signals;
     if (!kl || kl.length < 2) return;
 
-    // Position tracking (T+1)
+    // Position tracking (T+1 - uses filtered signals)
     var inPos = [];
     inPos[0] = false;
     for (var i = 1; i < kl.length; i++) {
@@ -587,55 +617,80 @@ function renderChart(chartData) {
       else inPos[i] = inPos[i-1] || false;
     }
 
-    // NAV (理论 + 真实)
-    var nav = [1.0], realNav = [1.0], bahNav = [1.0];
-    var MGMT_FEE_DAILY = 0.002 / 365;   // 0.2%年管理费
-    var SLIPPAGE = 0.0015;                // 0.15%单边滑点
-    var CASH_RETURN_DAILY = 0.02 / 365;  // 2%年货币收益
+    // 基准无过滤版持仓（仅用于无过滤NAV计算）
+    var inPosBase = [];
+    inPosBase[0] = false;
+    for (var i = 1; i < kl.length; i++) {
+      if (kl[i].close > ma[i] && kl[i-1].close <= ma[i-1] && ma[i] !== null && ma[i-1] !== null) {
+        inPosBase[i] = true;
+      } else if (kl[i].close < ma[i] && kl[i-1].close >= ma[i-1] && ma[i] !== null && ma[i-1] !== null) {
+        inPosBase[i] = false;
+      } else {
+        inPosBase[i] = inPosBase[i-1] || false;
+      }
+    }
+
+    // NAV (4 versions)
+    var nav = [1.0], realNavFiltered = [1.0], realNavBase = [1.0], bahNav = [1.0];
+    var MGMT_FEE_DAILY = 0.002 / 365;
+    var SLIPPAGE = 0.0015;
+    var CASH_RETURN_DAILY = 0.02 / 365;
     for (var i = 1; i < kl.length; i++) {
       bahNav[i] = bahNav[i-1] * kl[i].close / kl[i-1].close;
-      // 理论NAV
-      if (inPos[i] && !inPos[i-1]) {
+
+      // 理论NAV（无过滤基准）
+      if (inPosBase[i] && !inPosBase[i-1]) {
         nav[i] = nav[i-1] * kl[i].close / kl[i].open;
-      } else if (!inPos[i] && inPos[i-1]) {
+      } else if (!inPosBase[i] && inPosBase[i-1]) {
         nav[i] = nav[i-1] * kl[i].open / kl[i-1].close;
-      } else if (inPos[i]) {
+      } else if (inPosBase[i]) {
         nav[i] = nav[i-1] * kl[i].close / kl[i-1].close;
       } else {
         nav[i] = nav[i-1];
       }
-      // 真实NAV（510500ETF）
+
+      // 最优策略NAV（过滤版，510500ETF含成本）
       if (inPos[i] && !inPos[i-1]) {
-        // 买入：滑点使买入价略高
-        realNav[i] = realNav[i-1] * (kl[i].close / (kl[i].open * (1 + SLIPPAGE))) * (1 - MGMT_FEE_DAILY);
+        realNavFiltered[i] = realNavFiltered[i-1] * (kl[i].close / (kl[i].open * (1 + SLIPPAGE))) * (1 - MGMT_FEE_DAILY);
       } else if (!inPos[i] && inPos[i-1]) {
-        // 卖出：滑点使卖出价略低 + 货币收益
-        realNav[i] = realNav[i-1] * ((kl[i].open * (1 - SLIPPAGE)) / kl[i-1].close) * (1 + CASH_RETURN_DAILY);
+        realNavFiltered[i] = realNavFiltered[i-1] * ((kl[i].open * (1 - SLIPPAGE)) / kl[i-1].close) * (1 + CASH_RETURN_DAILY);
       } else if (inPos[i]) {
-        // 持仓：指数收益 × 扣管理费
-        realNav[i] = realNav[i-1] * (kl[i].close / kl[i-1].close) * (1 - MGMT_FEE_DAILY);
+        realNavFiltered[i] = realNavFiltered[i-1] * (kl[i].close / kl[i-1].close) * (1 - MGMT_FEE_DAILY);
       } else {
-        // 空仓：货币基金收益
-        realNav[i] = realNav[i-1] * (1 + CASH_RETURN_DAILY);
+        realNavFiltered[i] = realNavFiltered[i-1] * (1 + CASH_RETURN_DAILY);
+      }
+
+      // 无过滤版NAV（510500ETF含成本）
+      if (inPosBase[i] && !inPosBase[i-1]) {
+        realNavBase[i] = realNavBase[i-1] * (kl[i].close / (kl[i].open * (1 + SLIPPAGE))) * (1 - MGMT_FEE_DAILY);
+      } else if (!inPosBase[i] && inPosBase[i-1]) {
+        realNavBase[i] = realNavBase[i-1] * ((kl[i].open * (1 - SLIPPAGE)) / kl[i-1].close) * (1 + CASH_RETURN_DAILY);
+      } else if (inPosBase[i]) {
+        realNavBase[i] = realNavBase[i-1] * (kl[i].close / kl[i-1].close) * (1 - MGMT_FEE_DAILY);
+      } else {
+        realNavBase[i] = realNavBase[i-1] * (1 + CASH_RETURN_DAILY);
       }
     }
 
-    var dates = [], stratRet = [], realRet = [], bahRet = [];
+    var dates = [], stratRet = [], filteredRet = [], baseRet = [], bahRet = [];
+    var ma30Data = [];
     for (var i = 0; i < kl.length; i++) {
       dates.push(kl[i].date);
       stratRet.push(+((nav[i] - 1) * 100).toFixed(2));
-      realRet.push(+((realNav[i] - 1) * 100).toFixed(2));
+      filteredRet.push(+((realNavFiltered[i] - 1) * 100).toFixed(2));
+      baseRet.push(+((realNavBase[i] - 1) * 100).toFixed(2));
       bahRet.push(+((bahNav[i] - 1) * 100).toFixed(2));
+      ma30Data.push(ma30 ? (ma30[i] !== null ? ma30[i] : null) : null);
     }
 
-    // B/S scatter
+    // B/S scatter (使用过滤版信号)
     var buyData = [], sellData = [];
     for (var i = 1; i < sig.length; i++) {
       if (sig[i-1] === 'BUY') {
-        buyData.push({ value: [dates[i], stratRet[i]], name: '买入' });
+        buyData.push({ value: [dates[i], filteredRet[i]], name: '买入' });
       }
       if (sig[i-1] === 'SELL') {
-        sellData.push({ value: [dates[i], stratRet[i]], name: '卖出' });
+        sellData.push({ value: [dates[i], filteredRet[i]], name: '卖出' });
       }
     }
 
@@ -655,7 +710,7 @@ function renderChart(chartData) {
         formatter: function(params) {
           var lines = ['<b>' + params[0].axisValue + '</b>'];
           params.forEach(function(p) {
-            if (p.seriesName === '买入' || p.seriesName === '卖出') return;
+            if (p.seriesName === '买入' || p.seriesName === '卖出' || p.seriesName === 'MA30趋势线') return;
             if (p.data !== null && p.data !== undefined) {
               var val = Array.isArray(p.data) ? p.data[1] : p.data;
               if (val !== null && val !== undefined)
@@ -666,7 +721,7 @@ function renderChart(chartData) {
         },
       },
       legend: {
-        data: ['510500ETF真实收益', '策略理论收益', '买入持有收益率', '买入', '卖出'],
+        data: ['最优策略(过滤版)', '策略理论收益', '无过滤版(510500)', '买入持有收益率', 'MA30趋势线', '买入', '卖出'],
         bottom: 40,
         textStyle: { color: '#94a3b8', fontSize: 12 },
         itemGap: 24,
@@ -679,24 +734,30 @@ function renderChart(chartData) {
         axisLabel: { color: '#94a3b8', fontSize: 11, interval: Math.floor(dates.length / 8) },
         splitLine: { show: false },
       },
-      yAxis: {
-        type: 'value',
-        axisLine: { lineStyle: { color: '#334155' } },
-        axisLabel: {
-          color: '#94a3b8', fontSize: 11,
-          formatter: function(v) { return (v >= 0 ? '+' : '') + v.toFixed(0) + '%'; }
+      yAxis: [
+        {
+          type: 'value',
+          axisLine: { lineStyle: { color: '#334155' } },
+          axisLabel: {
+            color: '#94a3b8', fontSize: 11,
+            formatter: function(v) { return (v >= 0 ? '+' : '') + v.toFixed(0) + '%'; }
+          },
+          splitLine: { lineStyle: { color: '#1e293b', type: 'dashed' } },
         },
-        splitLine: { lineStyle: { color: '#1e293b', type: 'dashed' } },
-      },
+        {
+          type: 'value',
+          show: false,
+        },
+      ],
       dataZoom: [
         { type: 'slider', bottom: 10, height: 22, start: 70, end: 100, borderColor: '#334155', fillerColor: 'rgba(96,165,250,0.15)', handleStyle: { color: '#60a5fa' } },
         { type: 'inside', start: 70, end: 100 },
       ],
       series: [
         {
-          name: '510500ETF真实收益',
+          name: '最优策略(过滤版)',
           type: 'line',
-          data: realRet,
+          data: filteredRet,
           smooth: false,
           symbol: 'none',
           lineStyle: { color: '#22c55e', width: 3 },
@@ -711,12 +772,29 @@ function renderChart(chartData) {
           lineStyle: { color: '#60a5fa', width: 1.5, type: 'dashed' },
         },
         {
+          name: '无过滤版(510500)',
+          type: 'line',
+          data: baseRet,
+          smooth: false,
+          symbol: 'none',
+          lineStyle: { color: '#f97316', width: 1.5 },
+        },
+        {
           name: '买入持有收益率',
           type: 'line',
           data: bahRet,
           smooth: false,
           symbol: 'none',
           lineStyle: { color: '#f59e0b', width: 1.5 },
+        },
+        {
+          name: 'MA30趋势线',
+          type: 'line',
+          yAxisIndex: 1,
+          data: ma30Data,
+          smooth: false,
+          symbol: 'none',
+          lineStyle: { color: '#a78bfa', width: 1, opacity: 0.6 },
         },
         {
           name: '买入',

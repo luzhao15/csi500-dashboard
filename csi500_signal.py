@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """
-中证500 15日均线买卖信号计算工具
+中证500 MA15买卖信号计算工具（MA30+斜率双重过滤版）
 - 获取中证500全部日K数据（前复权）
-- 计算15日均线
-- 判断当前信号：上穿=买入 / 跌破=卖出 / 无信号
-- 动态回测（T+1次日开盘价成交）
-- 输出JSON供HTML展示
+- 计算15日均线 + MA30 + MA15斜率
+- 信号规则：上穿MA15 → BUY（仅当price>MA30 且 MA15斜率>0时确认）
+            跌破MA15 → SELL（无过滤，即时响应）
+- 回测：理论版（CSI500无摩擦） + 真实版（510500ETF含成本）+ 过滤版真实收益
+- T+1次日开盘价成交，输出JSON供HTML展示
 """
 
 import json
@@ -208,11 +209,12 @@ def calc_ma15(records):
 
 def find_signals(records):
     """
-    检测信号：
-    - 上穿（买入）：今日收盘 > 今日MA15 且 昨日收盘 <= 昨日MA15
-    - 跌破（卖出）：今日收盘 < 今日MA15 且 昨日收盘 >= 昨日MA15
-    - 持仓中：今日收盘 > 今日MA15 (继续持有)
-    - 空仓中：今日收盘 < 今日MA15 (继续观望)
+    检测信号（MA30+斜率双重过滤版）：
+    - 上穿MA15 → BUY（仅当price>MA30 且 MA15斜率>0时确认买入）
+                不满足过滤条件 → WAIT_FILTERED（趋势未确认，继续观望）
+    - 跌破MA15 → SELL（无过滤，即时卖出响应）
+    - 持仓中：price > MA15 → HOLD
+    - 空仓中：price < MA15 → WAIT
     """
     signals = []
     for i in range(1, len(records)):
@@ -226,7 +228,13 @@ def find_signals(records):
         y_close, y_ma = y["close"], y["ma15"]
 
         if t_close > t_ma and y_close <= y_ma:
-            signal = "BUY"
+            # 上穿MA15 → 检查过滤条件
+            ma30_ok = t.get("ma30") is not None and t_close > t["ma30"]
+            slope_ok = t.get("ma15_slope") is not None and t["ma15_slope"] > 0
+            if ma30_ok and slope_ok:
+                signal = "BUY"
+            else:
+                signal = "WAIT_FILTERED"
         elif t_close < t_ma and y_close >= y_ma:
             signal = "SELL"
         elif t_close > t_ma:
@@ -234,23 +242,41 @@ def find_signals(records):
         else:
             signal = "WAIT"
 
+        # 过滤原因（仅WAIT_FILTERED时有意义）
+        filter_reason = None
+        if signal == "WAIT_FILTERED":
+            reasons = []
+            if not ma30_ok:
+                ma30_val = round(t['ma30'], 1) if t.get('ma30') is not None else 'N/A'
+                reasons.append(f"价格<{ma30_val}(MA30)")
+            if not slope_ok:
+                slope_val = round(t.get("ma15_slope", 0), 2) if t.get("ma15_slope") is not None else "N/A"
+                reasons.append(f"MA15斜率={slope_val}<=0")
+            filter_reason = "过滤原因: " + " + ".join(reasons)
+
         signals.append({
             "date": t["date"],
             "close": round(t_close, 2),
             "ma15": round(t_ma, 2),
             "signal": signal,
             "pct_from_ma": round((t_close - t_ma) / t_ma * 100, 2),
+            "filter_reason": filter_reason,
         })
     return signals
 
 
 def calc_ma_extra(records):
-    """计算MA20, MA60, MA120用于趋势判断"""
+    """计算MA20, MA30, MA60, MA120用于趋势判断，以及MA15斜率"""
     for i in range(len(records)):
         if i >= 19:
             records[i]["ma20"] = round(sum(r["close"] for r in records[i-19:i+1]) / 20, 2)
         else:
             records[i]["ma20"] = None
+
+        if i >= 29:
+            records[i]["ma30"] = round(sum(r["close"] for r in records[i-29:i+1]) / 30, 2)
+        else:
+            records[i]["ma30"] = None
 
         if i >= 59:
             records[i]["ma60"] = round(sum(r["close"] for r in records[i-59:i+1]) / 60, 2)
@@ -261,93 +287,121 @@ def calc_ma_extra(records):
             records[i]["ma120"] = round(sum(r["close"] for r in records[i-119:i+1]) / 120, 2)
         else:
             records[i]["ma120"] = None
+
+        # MA15 5日斜率（每日变化量）
+        if i >= 5 and records[i]["ma15"] is not None and records[i-5]["ma15"] is not None:
+            records[i]["ma15_slope"] = (records[i]["ma15"] - records[i-5]["ma15"]) / 5
+        else:
+            records[i]["ma15_slope"] = None
+
     return records
 
 
 def run_backtest(records):
     """
-    动态回测：15日均线策略（理论版 + 510500ETF真实版）
+    动态回测：MA15策略（3版对比）
     
-    理论版：CSI500指数，无摩擦成本
-    真实版：以510500ETF为实际标的，包含：
-      - 0.2%/年管理费（持仓期间每日扣减）
-      - 0.15%单边交易滑点（买卖各扣一次）
-      - 空仓期间2%/年货币基金收益
+    理论版：CSI500指数，无摩擦，无过滤
+    真实版(无过滤)：510500ETF含成本，但无MA30+斜率过滤
+    真实版(有过滤)：510500ETF含成本 + MA30趋势+MA15斜率双重过滤（最优策略）
     
     T+1执行 - 信号日T产生信号 → T+1日以开盘价买入/卖出
     """
-    # 1) 生成信号序列
-    sigs = [None]  # day 0 no signal
+    # === 1) 生成信号序列 ===
+    # 无过滤版（基准）
+    sigs_base = [None]
     for i in range(1, len(records)):
         t = records[i]; y = records[i-1]
         if t["ma15"] is None or y["ma15"] is None:
-            sigs.append(None)
-            continue
+            sigs_base.append(None); continue
         if t["close"] > t["ma15"] and y["close"] <= y["ma15"]:
-            sigs.append("BUY")
+            sigs_base.append("BUY")
         elif t["close"] < t["ma15"] and y["close"] >= y["ma15"]:
-            sigs.append("SELL")
+            sigs_base.append("SELL")
         elif t["close"] > t["ma15"]:
-            sigs.append("HOLD")
+            sigs_base.append("HOLD")
         else:
-            sigs.append("WAIT")
+            sigs_base.append("WAIT")
 
-    # 2) 持仓状态（T+1执行：信号日i → i+1日开盘执行）
-    in_pos = [False] * len(records)
+    # 有过滤版（MA30趋势+MA15斜率）
+    sigs_filtered = [None]
     for i in range(1, len(records)):
-        if sigs[i-1] == "BUY":
-            in_pos[i] = True
-        elif sigs[i-1] == "SELL":
-            in_pos[i] = False
+        t = records[i]; y = records[i-1]
+        if t["ma15"] is None or y["ma15"] is None:
+            sigs_filtered.append(None); continue
+        if t["close"] > t["ma15"] and y["close"] <= y["ma15"]:
+            # 上穿MA15 → 检查过滤条件
+            ma30_ok = t.get("ma30") is not None and t["close"] > t["ma30"]
+            slope_ok = t.get("ma15_slope") is not None and t["ma15_slope"] > 0
+            if ma30_ok and slope_ok:
+                sigs_filtered.append("BUY")
+            else:
+                sigs_filtered.append("WAIT")
+        elif t["close"] < t["ma15"] and y["close"] >= y["ma15"]:
+            sigs_filtered.append("SELL")
+        elif t["close"] > t["ma15"]:
+            sigs_filtered.append("HOLD")
         else:
-            in_pos[i] = in_pos[i-1]
+            sigs_filtered.append("WAIT")
 
-    # 3) 理论NAV计算（无摩擦）
+    # === 2) 持仓状态（T+1执行） ===
+    def calc_in_pos(sigs):
+        in_pos = [False] * len(records)
+        for i in range(1, len(records)):
+            if sigs[i-1] == "BUY":
+                in_pos[i] = True
+            elif sigs[i-1] == "SELL":
+                in_pos[i] = False
+            else:
+                in_pos[i] = in_pos[i-1]
+        return in_pos
+
+    in_pos_base = calc_in_pos(sigs_base)
+    in_pos_filtered = calc_in_pos(sigs_filtered)
+
+    # === 3) 理论NAV（CSI500无摩擦，无过滤基准） ===
     nav_theoretical = [1.0]
     bah_nav = [1.0]
     for i in range(1, len(records)):
         bah_nav.append(bah_nav[-1] * records[i]["close"] / records[i-1]["close"])
-
-        if in_pos[i] and not in_pos[i-1]:
+        if in_pos_base[i] and not in_pos_base[i-1]:
             nav_theoretical.append(nav_theoretical[-1] * records[i]["close"] / records[i]["open"])
-        elif not in_pos[i] and in_pos[i-1]:
+        elif not in_pos_base[i] and in_pos_base[i-1]:
             nav_theoretical.append(nav_theoretical[-1] * records[i]["open"] / records[i-1]["close"])
-        elif in_pos[i]:
+        elif in_pos_base[i]:
             nav_theoretical.append(nav_theoretical[-1] * records[i]["close"] / records[i-1]["close"])
         else:
             nav_theoretical.append(nav_theoretical[-1])
 
-    # 4) 真实NAV计算（510500ETF，含摩擦成本）
-    MGMT_FEE_DAILY = 0.002 / 365    # 0.2%年管理费 → 日费率
-    SLIPPAGE = 0.0015                 # 0.15%单边滑点
-    CASH_RETURN_DAILY = 0.02 / 365   # 2%年货币基金收益 → 日收益率
+    # === 4) 真实NAV计算（510500ETF，含摩擦成本） ===
+    MGMT_FEE_DAILY = 0.002 / 365
+    SLIPPAGE = 0.0015
+    CASH_RETURN_DAILY = 0.02 / 365
 
-    nav_real = [1.0]
-    for i in range(1, len(records)):
-        daily_return = records[i]["close"] / records[i-1]["close"]  # 指数日收益率
+    def calc_real_nav(in_pos_arr):
+        nav = [1.0]
+        for i in range(1, len(records)):
+            daily_return = records[i]["close"] / records[i-1]["close"]
+            if in_pos_arr[i] and not in_pos_arr[i-1]:
+                nav.append(nav[-1] * (records[i]["close"] / (records[i]["open"] * (1 + SLIPPAGE))) * (1 - MGMT_FEE_DAILY))
+            elif not in_pos_arr[i] and in_pos_arr[i-1]:
+                nav.append(nav[-1] * (records[i]["open"] * (1 - SLIPPAGE)) / records[i-1]["close"] * (1 + CASH_RETURN_DAILY))
+            elif in_pos_arr[i]:
+                nav.append(nav[-1] * daily_return * (1 - MGMT_FEE_DAILY))
+            else:
+                nav.append(nav[-1] * (1 + CASH_RETURN_DAILY))
+        return nav
 
-        if in_pos[i] and not in_pos[i-1]:
-            # T+1开盘买入：滑点使实际买入价略高 → 收益略低
-            effective_buy_return = (records[i]["close"] / (records[i]["open"] * (1 + SLIPPAGE)))
-            nav_real.append(nav_real[-1] * effective_buy_return * (1 - MGMT_FEE_DAILY))
-        elif not in_pos[i] and in_pos[i-1]:
-            # T+1开盘卖出：滑点使实际卖出价略低 → 从昨日close到今日open*滑点
-            effective_sell_return = (records[i]["open"] * (1 - SLIPPAGE)) / records[i-1]["close"]
-            nav_real.append(nav_real[-1] * effective_sell_return * (1 + CASH_RETURN_DAILY))
-        elif in_pos[i]:
-            # 持仓中：指数收益 × 扣管理费
-            nav_real.append(nav_real[-1] * daily_return * (1 - MGMT_FEE_DAILY))
-        else:
-            # 空仓：货币基金收益
-            nav_real.append(nav_real[-1] * (1 + CASH_RETURN_DAILY))
+    nav_real_base = calc_real_nav(in_pos_base)    # 无过滤真实收益
+    nav_real_filtered = calc_real_nav(in_pos_filtered)  # 有过滤真实收益（最优）
 
-    # 5) 统计交易
+    # === 5) 统计交易（使用有过滤版的持仓） ===
     trades = []
     entry_idx = None
     for i in range(1, len(records)):
-        if in_pos[i] and not in_pos[i-1]:
+        if in_pos_filtered[i] and not in_pos_filtered[i-1]:
             entry_idx = i
-        elif not in_pos[i] and in_pos[i-1]:
+        elif not in_pos_filtered[i] and in_pos_filtered[i-1]:
             if entry_idx is not None:
                 pnl = (records[i]["open"] - records[entry_idx]["open"]) / records[entry_idx]["open"] * 100
                 trades.append({
@@ -366,46 +420,65 @@ def run_backtest(records):
     win_trades = len(wins)
     loss_trades = len(losses)
 
-    # 6) 最大回撤
+    # === 6) 最大回撤 ===
     def max_drawdown(nav_list):
-        peak = nav_list[0]
-        mdd = 0
+        peak = nav_list[0]; mdd = 0
         for n in nav_list:
-            if n > peak:
-                peak = n
+            if n > peak: peak = n
             dd = (peak - n) / peak * 100
-            if dd > mdd:
-                mdd = dd
+            if dd > mdd: mdd = dd
         return round(mdd, 1)
 
-    # 7) 年化收益
+    # === 7) 年化收益 ===
     d0 = datetime.strptime(records[0]["date"], "%Y-%m-%d")
     d1 = datetime.strptime(records[-1]["date"], "%Y-%m-%d")
     years = (d1 - d0).days / 365.25
 
     strat_return = round((nav_theoretical[-1] - 1) * 100, 2)
-    real_return = round((nav_real[-1] - 1) * 100, 2)
+    real_base_return = round((nav_real_base[-1] - 1) * 100, 2)
+    real_filtered_return = round((nav_real_filtered[-1] - 1) * 100, 2)
     bah_return_val = round((bah_nav[-1] - 1) * 100, 2)
+
     ann_return = round((nav_theoretical[-1] ** (1 / years) - 1) * 100, 2) if years > 0 else 0
-    ann_real = round((nav_real[-1] ** (1 / years) - 1) * 100, 2) if years > 0 else 0
+    ann_real_base = round((nav_real_base[-1] ** (1 / years) - 1) * 100, 2) if years > 0 else 0
+    ann_real_filtered = round((nav_real_filtered[-1] ** (1 / years) - 1) * 100, 2) if years > 0 else 0
     ann_bah = round((bah_nav[-1] ** (1 / years) - 1) * 100, 2) if years > 0 else 0
+
+    # 夏普比率
+    def calc_sharpe(nav_list):
+        drs = [nav_list[i] / nav_list[i-1] - 1 for i in range(1, len(nav_list))]
+        if not drs: return 0
+        avg = sum(drs) / len(drs)
+        std = (sum((r - avg)**2 for r in drs) / len(drs)) ** 0.5
+        return round(avg / std * (365 ** 0.5), 2) if std > 0 else 0
 
     win_rate = round(win_trades / total_trades * 100, 1) if total_trades > 0 else 0
     avg_win = round(sum(t["pnl_pct"] for t in wins) / len(wins), 2) if wins else 0
     avg_loss = round(sum(t["pnl_pct"] for t in losses) / len(losses), 2) if losses else 0
     pl_ratio = round(abs(avg_win / avg_loss), 2) if avg_loss != 0 else 0
 
+    real_filtered_mdd = max_drawdown(nav_real_filtered)
+    real_filtered_calmar = round(ann_real_filtered / real_filtered_mdd, 2) if real_filtered_mdd > 0 else 0
+
     return {
-        # 理论回测（CSI500指数，无摩擦）
+        # 理论回测（CSI500指数，无摩擦，无过滤 — 仅供学术参考）
         "total_return": f"{strat_return:.0f}%",
         "annual_return": f"{ann_return}%",
         "strategy_mdd": f"{max_drawdown(nav_theoretical)}%",
-        # 真实回测（510500ETF，含管理费+滑点+货币收益）
-        "real_total_return": f"{real_return:.0f}%",
-        "real_annual_return": f"{ann_real}%",
-        "real_mdd": f"{max_drawdown(nav_real)}%",
+        # 真实回测（无过滤版 — 原策略基准）
+        "real_total_return": f"{real_base_return:.0f}%",
+        "real_annual_return": f"{ann_real_base}%",
+        "real_mdd": f"{max_drawdown(nav_real_base)}%",
         "real_cost_note": "510500ETF: 0.2%年管理费 + 0.15%单边滑点 + 空仓2%年货币收益",
-        # 通用指标
+        # 最优策略（MA30+斜率双重过滤版）
+        "filtered_total_return": f"{real_filtered_return:.0f}%",
+        "filtered_annual_return": f"{ann_real_filtered}%",
+        "filtered_mdd": f"{real_filtered_mdd}%",
+        "filtered_sharpe": calc_sharpe(nav_real_filtered),
+        "filtered_calmar": real_filtered_calmar,
+        "filtered_note": "MA30趋势+MA15斜率双重过滤: 买入需price>MA30 且 MA15斜率>0",
+        "filtered_trades": total_trades,
+        # 通用指标（基于最优策略）
         "win_rate": f"{win_rate}%",
         "profit_loss_ratio": pl_ratio,
         "total_trades": total_trades,
@@ -415,15 +488,19 @@ def run_backtest(records):
         "bah_return": f"{bah_return_val:.0f}%",
         "bah_mdd": f"{max_drawdown(bah_nav)}%",
         "excess_return": f"+{strat_return - bah_return_val:.0f}%",
-        "real_excess_return": f"+{real_return - bah_return_val:.0f}%",
+        "real_excess_return": f"+{real_base_return - bah_return_val:.0f}%",
+        "filtered_excess_return": f"+{real_filtered_return - bah_return_val:.0f}%",
         "avg_win": f"+{avg_win}%",
         "avg_loss": f"{avg_loss}%",
-        "note": "T+1 信号次日开盘价成交",
+        "note": "最优策略: MA15上穿+MA30趋势+MA15斜率过滤, T+1开盘价成交",
         # 数值版供图表使用
         "_strat_return_num": strat_return,
-        "_real_return_num": real_return,
+        "_real_return_num": real_base_return,
+        "_filtered_return_num": real_filtered_return,
         "_bah_return_num": bah_return_val,
-        "_nav_real": nav_real,
+        "_nav_real_base": nav_real_base,
+        "_nav_real_filtered": nav_real_filtered,
+        "_in_pos_filtered": in_pos_filtered,
     }
 
 
@@ -547,33 +624,40 @@ if __name__ == "__main__":
     # 当前最新数据
     latest = records[-1]
 
-    # 判断大盘趋势（MA60, MA120）
+    # 判断大盘趋势（MA20, MA30, MA60, MA120）
     trend_short = "上升" if latest.get("ma20") and latest["close"] > latest["ma20"] else "下降"
+    trend_mid30 = "上升" if latest.get("ma30") and latest["close"] > latest["ma30"] else "下降"
     trend_mid = "上升" if latest.get("ma60") and latest["close"] > latest["ma60"] else "下降"
     trend_long = "上升" if latest.get("ma120") and latest["close"] > latest["ma120"] else "下降"
+    slope_status = "上升" if latest.get("ma15_slope") and latest["ma15_slope"] > 0 else "下降/持平"
 
     output = {
         "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "index_name": "中证500",
         "index_code": "000905",
+        "strategy": "MA15 + MA30趋势 + MA15斜率双重过滤",
         "data_range": f"{records[0]['date']} ~ {records[-1]['date']}",
         "latest": {
             "date": latest["date"],
             "close": round(latest["close"], 2),
             "ma15": round(latest["ma15"], 2) if latest["ma15"] else None,
             "ma20": latest.get("ma20"),
+            "ma30": latest.get("ma30"),
             "ma60": latest.get("ma60"),
             "ma120": latest.get("ma120"),
+            "ma15_slope": round(latest.get("ma15_slope", 0), 2) if latest.get("ma15_slope") else None,
             "pct_from_ma15": round((latest["close"] - latest["ma15"]) / latest["ma15"] * 100, 2) if latest["ma15"] else None,
         },
         "current_signal": {
             "signal": latest_signal["signal"],
             "signal_cn": {
-                "BUY": "🟢 上穿买入",
+                "BUY": "🟢 上穿买入（趋势确认）",
                 "SELL": "🔴 跌破卖出",
                 "HOLD": "🟡 持仓中（线上）",
                 "WAIT": "⚪ 空仓观望（线下）",
+                "WAIT_FILTERED": "🟠 等待确认（过滤中）",
             }.get(latest_signal["signal"], "未知"),
+            "filter_reason": latest_signal.get("filter_reason"),
             "date": latest_signal["date"],
             "close": latest_signal["close"],
             "ma15": latest_signal["ma15"],
@@ -581,8 +665,10 @@ if __name__ == "__main__":
         },
         "trend": {
             "ma20": f"{trend_short}（价格{'>' if trend_short=='上升' else '<'}MA20={latest.get('ma20')}）",
+            "ma30": f"{trend_mid30}（价格{'>' if trend_mid30=='上升' else '<'}MA30={latest.get('ma30')}）",
             "ma60": f"{trend_mid}（价格{'>' if trend_mid=='上升' else '<'}MA60={latest.get('ma60')}）",
             "ma120": f"{trend_long}（价格{'>' if trend_long=='上升' else '<'}MA120={latest.get('ma120')}）",
+            "ma15_slope": f"MA15斜率{'>' if slope_status=='上升' else '<='}0 → {slope_status}",
         },
         "recent_signals": recent,
         "price_stats": {
@@ -610,25 +696,26 @@ if __name__ == "__main__":
     data_size = os.path.getsize(data_path)
     print(f"✅ csi500_data.json 已保存: {data_size//1024}KB")
 
-    # 3) csi500_chart.json（图表用，全部K线+MA15+信号）
+    # 3) csi500_chart.json（图表用，全部K线+MA15+MA30+信号）
     chart_kline = [{"date": r["date"], "open": r["open"], "close": r["close"], "high": r["high"], "low": r["low"]} for r in records]
     chart_ma15 = [r["ma15"] for r in records]
+    chart_ma30 = [r.get("ma30") for r in records]
+    # 使用过滤版持仓状态生成信号
+    in_pos_f = bt.get("_in_pos_filtered", [False] * len(records))
     chart_signals = []
-    position = 0
     for i in range(len(records)):
         if records[i]["ma15"] is None or (i > 0 and records[i-1]["ma15"] is None):
             chart_signals.append(None)
             continue
-        r = records[i]; prev_r = records[i-1]
-        if r["close"] > r["ma15"] and prev_r["close"] <= prev_r["ma15"]:
-            chart_signals.append("HOLD" if position == 1 else "BUY")
-            if position == 0: position = 1
-        elif r["close"] < r["ma15"] and prev_r["close"] >= prev_r["ma15"]:
-            chart_signals.append("WAIT" if position == 0 else "SELL")
-            if position == 1: position = 0
+        if in_pos_f[i] and (i == 0 or not in_pos_f[i-1]):
+            chart_signals.append("BUY")
+        elif not in_pos_f[i] and i > 0 and in_pos_f[i-1]:
+            chart_signals.append("SELL")
+        elif in_pos_f[i]:
+            chart_signals.append("HOLD")
         else:
-            chart_signals.append("HOLD" if position == 1 else "WAIT")
-    chart_data = {"kline": chart_kline, "ma15": chart_ma15, "signals": chart_signals}
+            chart_signals.append("WAIT")
+    chart_data = {"kline": chart_kline, "ma15": chart_ma15, "ma30": chart_ma30, "signals": chart_signals}
     chart_path = os.path.join(script_dir, "csi500_chart.json")
     with open(chart_path, "w", encoding="utf-8") as f:
         json.dump(chart_data, f, ensure_ascii=False, separators=(',', ':'))

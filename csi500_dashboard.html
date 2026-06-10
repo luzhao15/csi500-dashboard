@@ -540,20 +540,33 @@ function goPage(p) {
 // ==================== 回测参考 ====================
 function renderBacktest(bt) {
   if (!bt) return;
-  document.getElementById('backtest-grid').innerHTML = [
-    { val: bt.total_return, lbl:'策略总收益', cls:'val' },
-    { val: bt.annual_return, lbl:'年化收益', cls:'' },
+  var grid = document.getElementById('backtest-grid');
+  // 真实收益卡片（510500ETF）
+  var realHtml = '<div class="stat-box stat-highlight"><div class="val">' + bt.real_total_return + '</div><div class="lbl">510500ETF真实总收益</div></div>' +
+    '<div class="stat-box stat-highlight"><div class="val">' + bt.real_annual_return + '</div><div class="lbl">ETF真实年化收益</div></div>' +
+    '<div class="stat-box stat-highlight"><div class="val">' + bt.real_mdd + '</div><div class="lbl">ETF真实最大回撤</div></div>' +
+    '<div class="stat-box stat-highlight"><div class="val">' + bt.real_excess_return + '</div><div class="lbl">ETF真实超额收益</div></div>';
+  // 理论收益（指数无摩擦）
+  var theoHtml = '<div class="stat-box"><div class="val" style="color:var(--sub)">' + bt.total_return + '</div><div class="lbl">理论总收益(指数)</div></div>' +
+    '<div class="stat-box"><div class="val" style="color:var(--sub)">' + bt.annual_return + '</div><div class="lbl">理论年化收益</div></div>' +
+    '<div class="stat-box"><div class="val" style="color:var(--sub)">' + bt.strategy_mdd + '</div><div class="lbl">理论最大回撤</div></div>' +
+    '<div class="stat-box"><div class="val" style="color:var(--sub)">' + bt.excess_return + '</div><div class="lbl">理论超额收益</div></div>';
+  // 通用指标
+  var commonHtml = [
     { val: bt.win_rate, lbl:'胜率', cls:'' },
     { val: bt.total_trades + '笔', lbl:'总交易次数', cls:'' },
     { val: bt.avg_win, lbl:'平均盈利', cls:'val' },
     { val: bt.avg_loss, lbl:'平均亏损', cls:'' },
     { val: bt.profit_loss_ratio + ':1', lbl:'盈亏比', cls:'' },
-    { val: bt.strategy_mdd, lbl:'策略最大回撤', cls:'val' },
     { val: bt.bah_return, lbl:'买入持有收益', cls:'' },
     { val: bt.bah_mdd, lbl:'买入持有最大回撤', cls:'' },
-    { val: bt.excess_return, lbl:'超额收益', cls:'val' },
     { val: bt.period, lbl:'回测区间', cls:'' },
-  ].map(function(s) { return '<div class="stat-box"><div class="val">' + s.val + '</div><div class="lbl">' + s.lbl + '</div></div>'; }).join('');
+  ].map(function(s) { return '<div class="stat-box"><div class="' + (s.cls||'') + '">' + s.val + '</div><div class="lbl">' + s.lbl + '</div></div>'; }).join('');
+  // 成本说明
+  var costNote = '<div style="text-align:center;font-size:12px;color:var(--sub);padding:8px 0;margin-top:8px;border-top:1px solid var(--border)">' + bt.real_cost_note + '</div>';
+
+  grid.innerHTML = '<div style="text-align:center;font-size:13px;color:#60a5fa;font-weight:700;margin-bottom:10px;padding:4px 8px;border-radius:6px;background:rgba(96,165,250,0.1)">⚡ 510500ETF真实回测</div>' + realHtml + costNote +
+    '<div style="text-align:center;font-size:13px;color:var(--sub);font-weight:600;margin:12px 0 10px;padding:4px 8px">📊 理论回测（CSI500指数无摩擦）</div>' + theoHtml + commonHtml;
 }
 
 // ==================== 收益率对比图 ====================
@@ -574,10 +587,14 @@ function renderChart(chartData) {
       else inPos[i] = inPos[i-1] || false;
     }
 
-    // NAV
-    var nav = [1.0], bahNav = [1.0];
+    // NAV (理论 + 真实)
+    var nav = [1.0], realNav = [1.0], bahNav = [1.0];
+    var MGMT_FEE_DAILY = 0.002 / 365;   // 0.2%年管理费
+    var SLIPPAGE = 0.0015;                // 0.15%单边滑点
+    var CASH_RETURN_DAILY = 0.02 / 365;  // 2%年货币收益
     for (var i = 1; i < kl.length; i++) {
       bahNav[i] = bahNav[i-1] * kl[i].close / kl[i-1].close;
+      // 理论NAV
       if (inPos[i] && !inPos[i-1]) {
         nav[i] = nav[i-1] * kl[i].close / kl[i].open;
       } else if (!inPos[i] && inPos[i-1]) {
@@ -587,12 +604,27 @@ function renderChart(chartData) {
       } else {
         nav[i] = nav[i-1];
       }
+      // 真实NAV（510500ETF）
+      if (inPos[i] && !inPos[i-1]) {
+        // 买入：滑点使买入价略高
+        realNav[i] = realNav[i-1] * (kl[i].close / (kl[i].open * (1 + SLIPPAGE))) * (1 - MGMT_FEE_DAILY);
+      } else if (!inPos[i] && inPos[i-1]) {
+        // 卖出：滑点使卖出价略低 + 货币收益
+        realNav[i] = realNav[i-1] * ((kl[i].open * (1 - SLIPPAGE)) / kl[i-1].close) * (1 + CASH_RETURN_DAILY);
+      } else if (inPos[i]) {
+        // 持仓：指数收益 × 扣管理费
+        realNav[i] = realNav[i-1] * (kl[i].close / kl[i-1].close) * (1 - MGMT_FEE_DAILY);
+      } else {
+        // 空仓：货币基金收益
+        realNav[i] = realNav[i-1] * (1 + CASH_RETURN_DAILY);
+      }
     }
 
-    var dates = [], stratRet = [], bahRet = [];
+    var dates = [], stratRet = [], realRet = [], bahRet = [];
     for (var i = 0; i < kl.length; i++) {
       dates.push(kl[i].date);
       stratRet.push(+((nav[i] - 1) * 100).toFixed(2));
+      realRet.push(+((realNav[i] - 1) * 100).toFixed(2));
       bahRet.push(+((bahNav[i] - 1) * 100).toFixed(2));
     }
 
@@ -634,7 +666,7 @@ function renderChart(chartData) {
         },
       },
       legend: {
-        data: ['策略收益率', '买入持有收益率', '买入', '卖出'],
+        data: ['510500ETF真实收益', '策略理论收益', '买入持有收益率', '买入', '卖出'],
         bottom: 40,
         textStyle: { color: '#94a3b8', fontSize: 12 },
         itemGap: 24,
@@ -662,13 +694,21 @@ function renderChart(chartData) {
       ],
       series: [
         {
-          name: '策略收益率',
+          name: '510500ETF真实收益',
+          type: 'line',
+          data: realRet,
+          smooth: false,
+          symbol: 'none',
+          lineStyle: { color: '#22c55e', width: 3 },
+          areaStyle: { color: { type: 'linear', x: 0, y: 0, x2: 0, y2: 1, colorStops: [{ offset: 0, color: 'rgba(34,197,94,0.15)' }, { offset: 1, color: 'rgba(34,197,94,0)' }] } },
+        },
+        {
+          name: '策略理论收益',
           type: 'line',
           data: stratRet,
           smooth: false,
           symbol: 'none',
-          lineStyle: { color: '#60a5fa', width: 2 },
-          areaStyle: { color: { type: 'linear', x: 0, y: 0, x2: 0, y2: 1, colorStops: [{ offset: 0, color: 'rgba(96,165,250,0.12)' }, { offset: 1, color: 'rgba(96,165,250,0)' }] } },
+          lineStyle: { color: '#60a5fa', width: 1.5, type: 'dashed' },
         },
         {
           name: '买入持有收益率',

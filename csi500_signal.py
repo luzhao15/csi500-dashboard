@@ -266,12 +266,15 @@ def calc_ma_extra(records):
 
 def run_backtest(records):
     """
-    动态回测：15日均线策略
+    动态回测：15日均线策略（理论版 + 510500ETF真实版）
+    
+    理论版：CSI500指数，无摩擦成本
+    真实版：以510500ETF为实际标的，包含：
+      - 0.2%/年管理费（持仓期间每日扣减）
+      - 0.15%单边交易滑点（买卖各扣一次）
+      - 空仓期间2%/年货币基金收益
+    
     T+1执行 - 信号日T产生信号 → T+1日以开盘价买入/卖出
-    持仓期间按close-to-close计算NAV
-    空仓期间NAV不变
-
-    返回回测摘要统计
     """
     # 1) 生成信号序列
     sigs = [None]  # day 0 no signal
@@ -299,26 +302,46 @@ def run_backtest(records):
         else:
             in_pos[i] = in_pos[i-1]
 
-    # 3) NAV计算
-    nav = [1.0]
+    # 3) 理论NAV计算（无摩擦）
+    nav_theoretical = [1.0]
     bah_nav = [1.0]
     for i in range(1, len(records)):
         bah_nav.append(bah_nav[-1] * records[i]["close"] / records[i-1]["close"])
 
         if in_pos[i] and not in_pos[i-1]:
-            # T+1开盘买入
-            nav.append(nav[-1] * records[i]["close"] / records[i]["open"])
+            nav_theoretical.append(nav_theoretical[-1] * records[i]["close"] / records[i]["open"])
         elif not in_pos[i] and in_pos[i-1]:
-            # T+1开盘卖出
-            nav.append(nav[-1] * records[i]["open"] / records[i-1]["close"])
+            nav_theoretical.append(nav_theoretical[-1] * records[i]["open"] / records[i-1]["close"])
         elif in_pos[i]:
-            # 持仓中 close-to-close
-            nav.append(nav[-1] * records[i]["close"] / records[i-1]["close"])
+            nav_theoretical.append(nav_theoretical[-1] * records[i]["close"] / records[i-1]["close"])
         else:
-            # 空仓
-            nav.append(nav[-1])
+            nav_theoretical.append(nav_theoretical[-1])
 
-    # 4) 统计交易
+    # 4) 真实NAV计算（510500ETF，含摩擦成本）
+    MGMT_FEE_DAILY = 0.002 / 365    # 0.2%年管理费 → 日费率
+    SLIPPAGE = 0.0015                 # 0.15%单边滑点
+    CASH_RETURN_DAILY = 0.02 / 365   # 2%年货币基金收益 → 日收益率
+
+    nav_real = [1.0]
+    for i in range(1, len(records)):
+        daily_return = records[i]["close"] / records[i-1]["close"]  # 指数日收益率
+
+        if in_pos[i] and not in_pos[i-1]:
+            # T+1开盘买入：滑点使实际买入价略高 → 收益略低
+            effective_buy_return = (records[i]["close"] / (records[i]["open"] * (1 + SLIPPAGE)))
+            nav_real.append(nav_real[-1] * effective_buy_return * (1 - MGMT_FEE_DAILY))
+        elif not in_pos[i] and in_pos[i-1]:
+            # T+1开盘卖出：滑点使实际卖出价略低 → 从昨日close到今日open*滑点
+            effective_sell_return = (records[i]["open"] * (1 - SLIPPAGE)) / records[i-1]["close"]
+            nav_real.append(nav_real[-1] * effective_sell_return * (1 + CASH_RETURN_DAILY))
+        elif in_pos[i]:
+            # 持仓中：指数收益 × 扣管理费
+            nav_real.append(nav_real[-1] * daily_return * (1 - MGMT_FEE_DAILY))
+        else:
+            # 空仓：货币基金收益
+            nav_real.append(nav_real[-1] * (1 + CASH_RETURN_DAILY))
+
+    # 5) 统计交易
     trades = []
     entry_idx = None
     for i in range(1, len(records)):
@@ -343,7 +366,7 @@ def run_backtest(records):
     win_trades = len(wins)
     loss_trades = len(losses)
 
-    # 5) 最大回撤
+    # 6) 最大回撤
     def max_drawdown(nav_list):
         peak = nav_list[0]
         mdd = 0
@@ -355,14 +378,16 @@ def run_backtest(records):
                 mdd = dd
         return round(mdd, 1)
 
-    # 6) 年化收益
+    # 7) 年化收益
     d0 = datetime.strptime(records[0]["date"], "%Y-%m-%d")
     d1 = datetime.strptime(records[-1]["date"], "%Y-%m-%d")
     years = (d1 - d0).days / 365.25
 
-    strat_return = round((nav[-1] - 1) * 100, 2)
+    strat_return = round((nav_theoretical[-1] - 1) * 100, 2)
+    real_return = round((nav_real[-1] - 1) * 100, 2)
     bah_return_val = round((bah_nav[-1] - 1) * 100, 2)
-    ann_return = round((nav[-1] ** (1 / years) - 1) * 100, 2) if years > 0 else 0
+    ann_return = round((nav_theoretical[-1] ** (1 / years) - 1) * 100, 2) if years > 0 else 0
+    ann_real = round((nav_real[-1] ** (1 / years) - 1) * 100, 2) if years > 0 else 0
     ann_bah = round((bah_nav[-1] ** (1 / years) - 1) * 100, 2) if years > 0 else 0
 
     win_rate = round(win_trades / total_trades * 100, 1) if total_trades > 0 else 0
@@ -371,8 +396,16 @@ def run_backtest(records):
     pl_ratio = round(abs(avg_win / avg_loss), 2) if avg_loss != 0 else 0
 
     return {
+        # 理论回测（CSI500指数，无摩擦）
         "total_return": f"{strat_return:.0f}%",
         "annual_return": f"{ann_return}%",
+        "strategy_mdd": f"{max_drawdown(nav_theoretical)}%",
+        # 真实回测（510500ETF，含管理费+滑点+货币收益）
+        "real_total_return": f"{real_return:.0f}%",
+        "real_annual_return": f"{ann_real}%",
+        "real_mdd": f"{max_drawdown(nav_real)}%",
+        "real_cost_note": "510500ETF: 0.2%年管理费 + 0.15%单边滑点 + 空仓2%年货币收益",
+        # 通用指标
         "win_rate": f"{win_rate}%",
         "profit_loss_ratio": pl_ratio,
         "total_trades": total_trades,
@@ -380,15 +413,17 @@ def run_backtest(records):
         "loss_trades": loss_trades,
         "period": f"{records[0]['date']} ~ {records[-1]['date']}",
         "bah_return": f"{bah_return_val:.0f}%",
+        "bah_mdd": f"{max_drawdown(bah_nav)}%",
         "excess_return": f"+{strat_return - bah_return_val:.0f}%",
+        "real_excess_return": f"+{real_return - bah_return_val:.0f}%",
         "avg_win": f"+{avg_win}%",
         "avg_loss": f"{avg_loss}%",
-        "strategy_mdd": f"{max_drawdown(nav)}%",
-        "bah_mdd": f"{max_drawdown(bah_nav)}%",
         "note": "T+1 信号次日开盘价成交",
         # 数值版供图表使用
         "_strat_return_num": strat_return,
+        "_real_return_num": real_return,
         "_bah_return_num": bah_return_val,
+        "_nav_real": nav_real,
     }
 
 
